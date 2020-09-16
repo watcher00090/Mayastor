@@ -15,7 +15,7 @@
 use crate::bdev::nexus::{
     instances,
     nexus_channel::DREvent,
-    nexus_child::{NexusChild, StatusReasons},
+    nexus_child::{NexusChild, Reason},
 };
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub static STATUS_CONFIG: OnceCell<ChildStatusConfig> = OnceCell::new();
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChildStatusConfig {
-    status: HashMap<ChildName, StatusReasons>,
+    status: HashMap<ChildName, Reason>,
 }
 
 impl Default for ChildStatusConfig {
