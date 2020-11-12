@@ -162,15 +162,20 @@ async fn nvmf_bdev_test() {
         })
         .await;
 
+        // ctrl was hit
         if SIG_RECEIVED.load(Ordering::Relaxed) {
             break;
         }
     }
 
     queue.stop_all().await;
-    ms.spawn(nexus_lookup("nexus0").unwrap().destroy())
-        .await
-        .unwrap();
+
+    // ctrl-c was hit do not destroy the nexus
+    if !SIG_RECEIVED.load(Ordering::Relaxed) {
+        ms.spawn(nexus_lookup("nexus0").unwrap().destroy())
+            .await
+            .unwrap();
+    }
     // now we manually destroy the docker containers
     DOCKER_COMPOSE.get().unwrap().down().await;
 }
