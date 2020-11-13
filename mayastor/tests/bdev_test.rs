@@ -109,7 +109,7 @@ async fn clean_up(queue: Arc<JobQueue>) {
     // now we manually destroy the docker containers
 }
 
-async fn pause_tgt() {
+async fn kill_replica() {
     let t = DOCKER_COMPOSE.get().unwrap();
     let mut hdl = t.grpc_handle("ms1").await;
     hdl.bdev
@@ -151,8 +151,13 @@ async fn nvmf_bdev_test() {
 
     create_work(Arc::clone(&queue)).await;
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
-    for _i in 1 .. 100 {
+    for i in 1 .. 20 {
         ticker.tick().await;
+
+        if i == 5 {
+            kill_replica().await;
+        }
+
         ms.spawn(async move {
             let bdev = Bdev::bdev_first().unwrap().into_iter();
             for b in bdev {
