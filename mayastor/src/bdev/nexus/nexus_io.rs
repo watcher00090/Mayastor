@@ -12,11 +12,18 @@ use spdk_sys::{
 };
 
 use crate::{
-    bdev::nexus::{
-        nexus_bdev::{Nexus, NEXUS_PRODUCT_ID},
-        nexus_fn_table::NexusFnTable,
+    bdev::{
+        nexus::{
+            nexus_bdev::{Nexus, NEXUS_PRODUCT_ID},
+            nexus_channel::DREvent,
+            nexus_child::ChildState::Faulted,
+            nexus_fn_table::NexusFnTable,
+        },
+        nexus_lookup,
+        ChildState,
+        Reason,
     },
-    core::Bdev,
+    core::{Bdev, Reactors},
 };
 use std::ptr::NonNull;
 
@@ -163,26 +170,47 @@ impl Bio {
     /// assess the IO if we need to mark it failed or ok.
     #[inline]
     pub(crate) fn assess(&mut self, child_io: &mut Bio, success: bool) {
-        self.ctx_as_mut_ref().in_flight -= 1;
+        {
+            let pio_ctx = self.ctx_as_mut_ref();
+            pio_ctx.in_flight -= 1;
 
-        debug_assert!(self.ctx_as_mut_ref().in_flight >= 0);
-
-        if !success {
-            let io_offset = self.offset();
-            let io_num_blocks = self.num_blocks();
-            self.nexus_as_ref().error_record_add(
-                child_io.bdev_as_ref().as_ptr(),
-                self.io_type(),
-                io_status::FAILED,
-                io_offset,
-                io_num_blocks,
-            );
+            debug_assert!(pio_ctx.in_flight >= 0);
         }
 
-        if self.ctx_as_mut_ref().in_flight == 0 {
-            if self.ctx_as_mut_ref().status == io_status::FAILED {
-                self.ctx_as_mut_ref().io_attempts -= 1;
-                if self.ctx_as_mut_ref().io_attempts > 0 {
+        if !success {
+            // note although this is not the hot path, with a sufficiently high
+            // queue depth it can turn whitehot rather quickly
+            let child = child_io.bdev_as_ref();
+            let n = self.nexus_as_ref();
+
+            n.children
+                .iter()
+                .filter(|b| {
+                    if let Some(b) = b.bdev.as_ref() {
+                        b.name() == child.name()
+                    } else {
+                        false
+                    }
+                })
+                .filter(|b| b.state() == ChildState::Open)
+                .for_each(|child| {
+                    child.set_state(Faulted(Reason::IoError));
+                    let name = n.name.clone();
+                    let fut = async move {
+                        if let Some(nexus) = nexus_lookup(&name) {
+                            nexus.reconfigure(DREvent::ChildFault).await;
+                        }
+                    };
+                    Reactors::current().send_future(fut);
+                });
+        }
+
+        let pio_ctx = self.ctx_as_mut_ref();
+
+        if pio_ctx.in_flight == 0 {
+            if pio_ctx.status == io_status::FAILED {
+                pio_ctx.io_attempts -= 1;
+                if pio_ctx.io_attempts > 0 {
                     NexusFnTable::io_submit_or_resubmit(
                         self.io_channel(),
                         &mut self.clone(),
