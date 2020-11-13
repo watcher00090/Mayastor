@@ -281,53 +281,55 @@ impl Nexus {
         };
         trace!("Adding error record {} bdev {:?}", io_op_type, bdev);
         for child in nexus.children.iter_mut() {
-            if child.bdev.as_ref().unwrap().as_ptr() as *const _ == bdev {
-                if child.state() == ChildState::Open {
-                    if child.err_store.is_some() {
-                        child.err_store.as_mut().unwrap().add_record(
-                            io_op_type,
-                            io_error_type,
-                            io_offset,
-                            io_num_blocks,
-                            now,
-                        );
-                        let cfg = Config::get();
-                        if cfg.err_store_opts.action == ActionType::Fault
-                            && !Self::assess_child(
-                                &child,
-                                cfg.err_store_opts.max_errors,
-                                cfg.err_store_opts.retention_ns,
-                                QueryType::Total,
-                            )
-                        {
-                            let child_name = child.name.clone();
-                            info!("Faulting child {}", child_name);
-                            if nexus
-                                .fault_child(&child_name, Reason::IoError)
-                                .await
-                                .is_err()
+            if let Some(bdev) = child.bdev.as_ref() {
+                if bdev.as_ptr() as *const _ == bdev {
+                    if child.state() == ChildState::Open {
+                        if child.err_store.is_some() {
+                            child.err_store.as_mut().unwrap().add_record(
+                                io_op_type,
+                                io_error_type,
+                                io_offset,
+                                io_num_blocks,
+                                now,
+                            );
+                            let cfg = Config::get();
+                            if cfg.err_store_opts.action == ActionType::Fault
+                                && !Self::assess_child(
+                                    &child,
+                                    cfg.err_store_opts.max_errors,
+                                    cfg.err_store_opts.retention_ns,
+                                    QueryType::Total,
+                                )
                             {
-                                error!(
-                                    "Failed to fault the child {}",
-                                    child_name,
-                                );
+                                let child_name = child.name.clone();
+                                info!("Faulting child {}", child_name);
+                                if nexus
+                                    .fault_child(&child_name, Reason::IoError)
+                                    .await
+                                    .is_err()
+                                {
+                                    error!(
+                                        "Failed to fault the child {}",
+                                        child_name,
+                                    );
+                                }
                             }
+                        } else {
+                            let child_name = child.name.clone();
+                            error!(
+                                "Failed to record error - no error store in child {}",
+                                child_name,
+                            );
                         }
-                    } else {
-                        let child_name = child.name.clone();
-                        error!(
-                            "Failed to record error - no error store in child {}",
-                            child_name,
-                        );
+                        return;
                     }
+                    let child_name = child.name.clone();
+                    trace!("Ignoring error response sent to non-open child {}, state {:?}", child_name, child.state());
                     return;
                 }
-                let child_name = child.name.clone();
-                trace!("Ignoring error response sent to non-open child {}, state {:?}", child_name, child.state());
-                return;
             }
+            //error!("Failed to record error - could not find child");
         }
-        error!("Failed to record error - could not find child");
     }
 
     pub fn error_record_query(
