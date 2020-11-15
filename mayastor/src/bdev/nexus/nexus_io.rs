@@ -24,6 +24,7 @@ use crate::{
         Reason,
     },
     core::{Bdev, Reactors},
+    nexus_uri::bdev_destroy,
 };
 use std::ptr::NonNull;
 
@@ -196,9 +197,11 @@ impl Bio {
                 .for_each(|child| {
                     child.set_state(Faulted(Reason::IoError));
                     let name = n.name.clone();
+                    let uri = child.name.clone();
                     let fut = async move {
                         if let Some(nexus) = nexus_lookup(&name) {
                             nexus.reconfigure(DREvent::ChildFault).await;
+                            bdev_destroy(&uri).await.unwrap();
                         }
                     };
                     Reactors::current().send_future(fut);
