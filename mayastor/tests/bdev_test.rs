@@ -100,6 +100,7 @@ async fn create_work(queue: Arc<JobQueue>) {
     .await
 }
 
+#[allow(dead_code)]
 async fn clean_up(queue: Arc<JobQueue>) {
     let ms = MAYASTOR.get().unwrap();
     queue.stop_all().await;

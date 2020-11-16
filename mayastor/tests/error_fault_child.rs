@@ -28,6 +28,7 @@ static BDEV_EE_ERROR_DEVICE: &str = "bdev:///EE_error_device";
 static YAML_CONFIG_FILE: &str = "/tmp/error_fault_child_test_nexus.yaml";
 
 #[tokio::test]
+#[ignore]
 async fn nexus_fault_child_test() {
     common::truncate_file(DISKNAME1, 64 * 1024);
     common::truncate_file(DISKNAME2, 64 * 1024);

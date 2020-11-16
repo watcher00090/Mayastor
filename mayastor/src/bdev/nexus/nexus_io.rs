@@ -195,16 +195,19 @@ impl Bio {
                 })
                 .filter(|b| b.state() == ChildState::Open)
                 .for_each(|child| {
-                    child.set_state(Faulted(Reason::IoError));
-                    let name = n.name.clone();
-                    let uri = child.name.clone();
-                    let fut = async move {
-                        if let Some(nexus) = nexus_lookup(&name) {
-                            nexus.reconfigure(DREvent::ChildFault).await;
-                            bdev_destroy(&uri).await.unwrap();
-                        }
-                    };
-                    Reactors::current().send_future(fut);
+                    if child.set_state(Faulted(Reason::IoError))
+                        != Faulted(Reason::IoError)
+                    {
+                        let name = n.name.clone();
+                        let uri = child.name.clone();
+                        let fut = async move {
+                            if let Some(nexus) = nexus_lookup(&name) {
+                                nexus.reconfigure(DREvent::ChildFault).await;
+                                bdev_destroy(&uri).await.unwrap();
+                            }
+                        };
+                        Reactors::current().send_future(fut);
+                    }
                 });
         }
 
