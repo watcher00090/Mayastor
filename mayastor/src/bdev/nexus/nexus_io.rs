@@ -169,6 +169,16 @@ impl Bio {
         }
     }
 
+    #[inline]
+    fn is_faulting_io_type(&self) -> bool {
+        match self.io_type() {
+            io_type::READ => true,
+            io_type::WRITE => true,
+            io_type::WRITE_ZEROES => true,
+            _ => false,
+        }
+    }
+
     /// assess the IO if we need to mark it failed or ok.
     #[inline]
     pub(crate) fn assess(&mut self, child_io: &mut Bio, success: bool) {
@@ -179,7 +189,7 @@ impl Bio {
             debug_assert!(pio_ctx.in_flight >= 0);
         }
 
-        if !success {
+        if !success && self.is_faulting_io_type() {
             // note although this is not the hot path, with a sufficiently high
             // queue depth it can turn whitehot rather quickly
             let child = child_io.bdev_as_ref();

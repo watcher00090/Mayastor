@@ -166,7 +166,11 @@ impl NexusChannel {
     /// function called on io channel destruction
     pub(crate) extern "C" fn destroy(device: *mut c_void, ctx: *mut c_void) {
         let nexus = unsafe { Nexus::from_raw(device) };
-        debug!("{} Destroying IO channels", nexus.bdev.name());
+        if !nexus.bdev.as_ptr().is_null() {
+            debug!("{} Destroying IO channels", nexus.bdev.name());
+        } else {
+            debug!("Unallocated: Destroying IO channels");
+        }
         let inner = NexusChannel::from_raw(ctx).inner_mut();
         inner.writers.clear();
         inner.readers.clear();
