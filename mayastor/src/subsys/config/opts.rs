@@ -244,14 +244,14 @@ impl Default for NvmeBdevOpts {
     fn default() -> Self {
         Self {
             action_on_timeout: 2,
-            timeout_us: 2_000_000,
-            retry_count: 5,
+            timeout_us: 30_000_000,
+            retry_count: 3,
             arbitration_burst: 0,
             low_priority_weight: 0,
             medium_priority_weight: 0,
             high_priority_weight: 0,
-            nvme_adminq_poll_period_us: 1_000,
-            nvme_ioq_poll_period_us: 1_000,
+            nvme_adminq_poll_period_us: 10_000,
+            nvme_ioq_poll_period_us: 10_000,
             io_queue_requests: 0,
             delay_cmd_submit: true,
         }

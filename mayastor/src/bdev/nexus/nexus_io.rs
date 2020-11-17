@@ -1,5 +1,8 @@
 use core::fmt;
-use std::fmt::{Debug, Formatter};
+use std::{
+    fmt::{Debug, Formatter},
+    ptr::NonNull,
+};
 
 use libc::c_void;
 
@@ -16,17 +19,15 @@ use crate::{
         nexus::{
             nexus_bdev::{Nexus, NEXUS_PRODUCT_ID},
             nexus_channel::DREvent,
-            nexus_child::ChildState::Faulted,
             nexus_fn_table::NexusFnTable,
         },
         nexus_lookup,
         ChildState,
         Reason,
     },
-    core::{Bdev, Reactors},
+    core::{Bdev, Cores, Mthread, Reactors},
     nexus_uri::bdev_destroy,
 };
-use std::ptr::NonNull;
 
 /// NioCtx provides context on a per IO basis
 #[derive(Debug, Clone)]
@@ -184,28 +185,36 @@ impl Bio {
             let child = child_io.bdev_as_ref();
             let n = self.nexus_as_ref();
 
-            n.children
-                .iter()
-                .filter(|b| {
-                    if let Some(b) = b.bdev.as_ref() {
-                        b.name() == child.name()
-                    } else {
-                        false
-                    }
-                })
-                .filter(|b| b.state() == ChildState::Open)
-                .for_each(|child| {
-                    child.set_state(Faulted(Reason::IoError));
+            if let Some(child) = n.child_lookup(&child.name()) {
+                let current_state = child.state.compare_and_swap(
+                    ChildState::Open,
+                    ChildState::Faulted(Reason::IoError),
+                );
+
+                if current_state == ChildState::Open {
+                    warn!(
+                        "core {} thread {:?}, faulting child {}",
+                        Cores::current(),
+                        Mthread::current(),
+                        child
+                    );
+
                     let name = n.name.clone();
                     let uri = child.name.clone();
                     let fut = async move {
                         if let Some(nexus) = nexus_lookup(&name) {
+                            nexus.pause().await.unwrap();
                             nexus.reconfigure(DREvent::ChildFault).await;
                             bdev_destroy(&uri).await.unwrap();
+                            nexus.resume().await.unwrap();
                         }
                     };
-                    Reactors::current().send_future(fut);
-                });
+                    Reactors::master().send_future(fut);
+                }
+            } else {
+                debug!("core {} thread {:?}, not faulting child {} as its already being removed", 
+                       Cores::current(), Mthread::current(), child);
+            }
         }
 
         let pio_ctx = self.ctx_as_mut_ref();
@@ -233,7 +242,6 @@ impl Bio {
         assert_eq!(b.product_name(), NEXUS_PRODUCT_ID);
         unsafe { Nexus::from_raw((*b.as_ptr()).ctxt) }
     }
-
     /// get the context of the given IO, which is used to determine the overall
     /// state of the IO.
     #[inline]

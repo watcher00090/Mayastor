@@ -85,28 +85,19 @@ async fn create_work(queue: Arc<JobQueue>) {
         // start the first job
         queue.start(job);
 
-        // create a new job and start it. Note that the malloc bdev is created
-        // implicitly with the uri() argument
+        let bdev = Bdev::lookup_by_name("nexus0").unwrap();
         let job = io_driver::Builder::new()
             .core(0)
-            .uri("malloc:///disk0?size_mb=100")
+            .bdev(bdev)
             .qd(64)
             .io_size(512)
             .build()
             .await;
 
+        // start the first job
         queue.start(job);
     })
     .await
-}
-
-async fn clean_up(queue: Arc<JobQueue>) {
-    let ms = MAYASTOR.get().unwrap();
-    queue.stop_all().await;
-    ms.spawn(nexus_lookup("nexus0").unwrap().destroy())
-        .await
-        .unwrap();
-    // now we manually destroy the docker containers
 }
 
 async fn kill_replica() {
@@ -150,7 +141,7 @@ async fn nvmf_bdev_test() {
     let ms = MAYASTOR.get_or_init(|| ms);
 
     create_work(Arc::clone(&queue)).await;
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
     for i in 1 .. 20 {
         ticker.tick().await;
 
@@ -176,7 +167,7 @@ async fn nvmf_bdev_test() {
     queue.stop_all().await;
 
     // ctrl-c was hit do not destroy the nexus
-    if !SIG_RECEIVED.load(Ordering::Relaxed) {
+    if SIG_RECEIVED.load(Ordering::Relaxed) {
         ms.spawn(nexus_lookup("nexus0").unwrap().destroy())
             .await
             .unwrap();
