@@ -55,7 +55,7 @@ pub enum ChildError {
     },
 }
 
-#[derive(Debug, Serialize, PartialEq, Deserialize, Copy, Clone)]
+#[derive(Debug, Serialize, PartialEq, Deserialize, Eq, Copy, Clone)]
 pub enum Reason {
     /// no particular reason for the child to be in this state
     /// this is typically the init state
@@ -89,7 +89,7 @@ impl Display for Reason {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ChildState {
     /// child has not been opened, but we are in the process of opening it
     Init,
@@ -129,7 +129,7 @@ pub struct NexusChild {
     pub(crate) desc: Option<Arc<Descriptor>>,
     /// current state of the child
     #[serde(skip_serializing)]
-    state: AtomicCell<ChildState>,
+    pub state: AtomicCell<ChildState>,
     /// record of most-recent IO errors
     #[serde(skip_serializing)]
     pub(crate) err_store: Option<NexusErrStore>,
@@ -154,7 +154,7 @@ impl Display for NexusChild {
 }
 
 impl NexusChild {
-    pub(crate) fn set_state(&self, state: ChildState) -> ChildState {
+    pub(crate) fn set_state(&self, state: ChildState) {
         trace!(
             "{}: child {}: state change from {} to {}",
             self.parent,
@@ -162,7 +162,8 @@ impl NexusChild {
             self.state.load().to_string(),
             state.to_string(),
         );
-        self.state.swap(state)
+
+        self.state.store(state);
     }
 
     /// Open the child in RW mode and claim the device to be ours. If the child

@@ -47,13 +47,13 @@ use crate::{
             nexus_nbd::{NbdDisk, NbdError},
         },
     },
-    core::{Bdev, CoreError, DmaError, Reactor, Share},
+    core::{Bdev, CoreError, DmaError, Protocol, Reactor, Share},
     ffihelper::errno_result_from_i32,
     lvs::Lvol,
     nexus_uri::{bdev_destroy, NexusBdevError},
     rebuild::RebuildError,
     subsys,
-    subsys::Config,
+    subsys::{Config, NvmfSubsystem},
 };
 
 /// Obtain the full error chain
@@ -308,7 +308,7 @@ pub struct Nexus {
     /// raw pointer to bdev (to destruct it later using Box::from_raw())
     bdev_raw: *mut spdk_bdev,
     /// represents the current state of the Nexus
-    pub(super) state: NexusState,
+    pub(super) state: std::sync::Mutex<NexusState>,
     /// Dynamic Reconfigure event
     pub dr_complete_notify: Option<oneshot::Sender<i32>>,
     /// the offset in num blocks where the data partition starts
@@ -406,7 +406,7 @@ impl Nexus {
             child_count: 0,
             children: Vec::new(),
             bdev: Bdev::from(&*b as *const _ as *mut spdk_bdev),
-            state: NexusState::Init,
+            state: std::sync::Mutex::new(NexusState::Init),
             bdev_raw: Box::into_raw(b),
             dr_complete_notify: None,
             data_ent_offset: 0,
@@ -439,7 +439,7 @@ impl Nexus {
             "{} Transitioned state from {:?} to {:?}",
             self.name, self.state, state
         );
-        self.state = state;
+        *self.state.lock().unwrap() = state;
         state
     }
     /// returns the size in bytes of the nexus instance
@@ -502,9 +502,9 @@ impl Nexus {
     pub(crate) fn destruct(&mut self) -> NexusState {
         // a closed operation might already be in progress calling unregister
         // will trip an assertion within the external libraries
-        if self.state == NexusState::Closed {
+        if *self.state.lock().unwrap() == NexusState::Closed {
             trace!("{}: already closed", self.name);
-            return self.state;
+            return NexusState::Closed;
         }
 
         trace!("{}: closing, from state: {:?} ", self.name, self.state);
@@ -597,11 +597,34 @@ impl Nexus {
         }
     }
 
+    /// resume IO to the bdev
+    pub(crate) async fn resume(&self) -> Result<(), Error> {
+        if let Some(Protocol::Nvmf) = self.shared() {
+            if let Some(subsystem) = NvmfSubsystem::nqn_lookup(&self.name) {
+                subsystem.resume().await.unwrap();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// suspend any incoming IO to the bdev pausing the controller allows us to
+    /// handle internal events and which is a protocol feature.
+    pub(crate) async fn pause(&self) -> Result<(), Error> {
+        if let Some(Protocol::Nvmf) = self.shared() {
+            if let Some(subsystem) = NvmfSubsystem::nqn_lookup(&self.name) {
+                subsystem.pause().await.unwrap();
+            }
+        }
+
+        Ok(())
+    }
+
     /// register the bdev with SPDK and set the callbacks for io channel
     /// creation. Once this function is called, the device is visible and can
     /// be used for IO.
     pub(crate) async fn register(&mut self) -> Result<(), Error> {
-        assert_eq!(self.state, NexusState::Init);
+        assert_eq!(*self.state.lock().unwrap(), NexusState::Init);
 
         unsafe {
             spdk_io_device_register(
@@ -976,7 +999,7 @@ impl Nexus {
     /// No child is online so the nexus is faulted
     /// This may be made more configurable in the future
     pub fn status(&self) -> NexusStatus {
-        match self.state {
+        match *self.state.lock().unwrap() {
             NexusState::Init => NexusStatus::Degraded,
             NexusState::Closed => NexusStatus::Faulted,
             NexusState::Open => {
