@@ -505,7 +505,7 @@ impl Future for &'static Reactor {
                 Poll::Ready(Err(()))
             }
             ReactorState::Delayed => {
-                std::thread::sleep(Duration::from_millis(1));
+                //std::thread::sleep(Duration::from_millis(1));
                 self.poll_once();
                 cx.waker().wake_by_ref();
                 Poll::Pending

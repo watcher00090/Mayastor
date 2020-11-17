@@ -141,8 +141,8 @@ async fn nvmf_bdev_test() {
     let ms = MAYASTOR.get_or_init(|| ms);
 
     create_work(Arc::clone(&queue)).await;
-    let mut ticker = tokio::time::interval(Duration::from_millis(100));
-    for i in 1 .. 20 {
+    let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+    for i in 1 .. 10 {
         ticker.tick().await;
 
         if i == 5 {
@@ -167,7 +167,7 @@ async fn nvmf_bdev_test() {
     queue.stop_all().await;
 
     // ctrl-c was hit do not destroy the nexus
-    if SIG_RECEIVED.load(Ordering::Relaxed) {
+    if !SIG_RECEIVED.load(Ordering::Relaxed) {
         ms.spawn(nexus_lookup("nexus0").unwrap().destroy())
             .await
             .unwrap();
