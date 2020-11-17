@@ -48,6 +48,7 @@ use mayastor::core::{
     MayastorEnvironment,
     Reactor,
     Reactors,
+    GLOBAL_RC,
 };
 
 #[derive(Clone)]
@@ -194,10 +195,12 @@ impl Builder {
         compose.network_id =
             compose.network_create().await.map_err(|e| e.to_string())?;
 
+        let base: usize = 2;
         // containers are created where the IPs are ordinal
         for (i, name) in self.containers.iter().enumerate() {
             compose
                 .create_container(
+                    1 << i,
                     name,
                     &net.nth((i + 2) as u32).unwrap().to_string(),
                 )
@@ -384,6 +387,7 @@ impl ComposeTest {
     /// config which includes the above objects
     async fn create_container(
         &mut self,
+        core: usize,
         name: &str,
         ipv4: &str,
     ) -> Result<(), Error> {
@@ -453,9 +457,10 @@ impl ComposeTest {
         );
 
         let env = format!("MY_POD_IP={}", ipv4);
-
+        let mask = format!("{:#01x}", core);
+        dbg!(&mask);
         let config = Config {
-            cmd: Some(vec![self.binary.as_str(), "-g", "0.0.0.0"]),
+            cmd: Some(vec![self.binary.as_str(), "-g", "0.0.0.0", "-m", &mask]),
             env: Some(vec![&env]),
             image: None, // notice we do not have a base image here
             hostname: Some(name),
@@ -696,10 +701,14 @@ impl<'a> MayastorTest<'a> {
     }
 
     /// explicitly stop mayastor
-    pub async fn stop(mut self) {
+    pub async fn stop(&self) {
         self.spawn(async { mayastor_env_stop(0) }).await;
-        let hdl = self.thdl.take().unwrap();
-        hdl.join().unwrap()
+        loop {
+            if *GLOBAL_RC.lock().unwrap() == 0 {
+                break;
+            }
+            tokio::time::delay_for(Duration::from_millis(500)).await;
+        }
     }
 }
 

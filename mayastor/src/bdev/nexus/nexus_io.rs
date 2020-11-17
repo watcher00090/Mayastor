@@ -23,9 +23,10 @@ use crate::{
         },
         nexus_lookup,
         ChildState,
+        NexusStatus,
         Reason,
     },
-    core::{Bdev, Cores, Mthread, Reactors},
+    core::{Bdev, Cores, Mthread, Reactors, Share},
     nexus_uri::bdev_destroy,
 };
 
@@ -201,14 +202,20 @@ impl Bio {
 
                     let name = n.name.clone();
                     let uri = child.name.clone();
+
                     let fut = async move {
                         if let Some(nexus) = nexus_lookup(&name) {
                             nexus.pause().await.unwrap();
                             nexus.reconfigure(DREvent::ChildFault).await;
                             bdev_destroy(&uri).await.unwrap();
-                            nexus.resume().await.unwrap();
+                            if nexus.status() != NexusStatus::Faulted {
+                                nexus.resume().await.unwrap();
+                            } else {
+                                error!(":{} has no children left... ", nexus);
+                            }
                         }
                     };
+
                     Reactors::master().send_future(fut);
                 }
             } else {

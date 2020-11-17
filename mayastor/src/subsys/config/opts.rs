@@ -243,7 +243,7 @@ impl GetOpts for NvmeBdevOpts {
 impl Default for NvmeBdevOpts {
     fn default() -> Self {
         Self {
-            action_on_timeout: 2,
+            action_on_timeout: 3,
             timeout_us: 30_000_000,
             retry_count: 3,
             arbitration_burst: 0,
@@ -251,7 +251,7 @@ impl Default for NvmeBdevOpts {
             medium_priority_weight: 0,
             high_priority_weight: 0,
             nvme_adminq_poll_period_us: 0,
-            nvme_ioq_poll_period_us: 0,
+            nvme_ioq_poll_period_us: 100,
             io_queue_requests: 0,
             delay_cmd_submit: true,
         }
