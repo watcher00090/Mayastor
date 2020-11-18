@@ -188,7 +188,7 @@ impl Job {
         let job = unsafe { ioq.job.as_mut() };
 
         if !success {
-            error!(
+            trace!(
                 "core: {} mthread: {:?}{}: {:#?}",
                 Cores::current(),
                 Mthread::current().unwrap(),

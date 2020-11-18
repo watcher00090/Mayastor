@@ -26,7 +26,7 @@ use crate::{
         NexusStatus,
         Reason,
     },
-    core::{Bdev, Cores, Mthread, Reactors, Share},
+    core::{Bdev, Cores, Mthread, Reactors},
     nexus_uri::bdev_destroy,
 };
 
@@ -249,6 +249,7 @@ impl Bio {
         assert_eq!(b.product_name(), NEXUS_PRODUCT_ID);
         unsafe { Nexus::from_raw((*b.as_ptr()).ctxt) }
     }
+
     /// get the context of the given IO, which is used to determine the overall
     /// state of the IO.
     #[inline]

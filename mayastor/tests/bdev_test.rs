@@ -33,7 +33,6 @@ const NEXUS_NAME: &str = "nexus-00000000-0000-0000-0000-000000000001";
 
 use common::compose::{Builder, ComposeTest, MayastorTest};
 use mayastor::{
-    bdev::nexus_lookup,
     core::{
         io_driver,
         io_driver::JobQueue,
@@ -49,9 +48,13 @@ use rpc::mayastor::{
     BdevUri,
     CreateNexusRequest,
     CreateReply,
+    ListNexusReply,
+    NexusState::NexusDegraded,
     Null,
     PublishNexusRequest,
 };
+
+use tokio::time::interval;
 
 pub mod common;
 
@@ -127,8 +130,8 @@ async fn create_topology(queue: Arc<JobQueue>) {
     let r2 = create_target("ms2").await;
     let endpoint = create_nexus("ms3", vec![r1, r2]).await;
 
-    // the nexus is running on the 4 container, now create a workload using a
-    // 4th instance of mayastor
+    // the nexus is running on ms3 we will use a 4th instance of mayastor to
+    // create a nvmf bdev and push IO to it.
 
     let ms = MAYASTOR.get().unwrap();
     let bdev = ms
@@ -157,11 +160,12 @@ async fn create_topology(queue: Arc<JobQueue>) {
     .await;
 }
 
-async fn check_nexus() {
+async fn check_nexus<F: FnOnce(ListNexusReply)>(checker: F) {
     let mut ms3 = DOCKER_COMPOSE.get().unwrap().grpc_handle("ms3").await;
-    let list = ms3.mayastor.list_nexus(Null {}).await.unwrap();
-    dbg!(list);
+    let list = ms3.mayastor.list_nexus(Null {}).await.unwrap().into_inner();
+    checker(list)
 }
+
 /// kill replica issues an unshare to the container which more or less amounts
 /// to the same thing as killing the container.
 async fn kill_replica(container: &str) {
@@ -199,9 +203,9 @@ async fn nvmf_bdev_test() {
         .await
         .unwrap();
 
+    DOCKER_COMPOSE.set(compose).unwrap();
     // this is based on the number of containers above.
     let mask = format!("{:#01x}", (1 << 4) | (1 << 5));
-
     let ms = MayastorTest::new(MayastorCliArgs {
         reactor_mask: mask,
         no_pci: true,
@@ -209,10 +213,9 @@ async fn nvmf_bdev_test() {
         ..Default::default()
     });
 
-    let mut ticker = tokio::time::interval(Duration::from_millis(1000));
-    DOCKER_COMPOSE.set(compose).unwrap();
-
     let ms = MAYASTOR.get_or_init(|| ms);
+
+    let mut ticker = interval(Duration::from_millis(1000));
     create_topology(Arc::clone(&queue)).await;
 
     for i in 1 .. 10 {
@@ -220,14 +223,18 @@ async fn nvmf_bdev_test() {
         if i == 5 {
             kill_replica("ms1").await;
         }
-
         // ctrl was hit so exit the loop here
         if SIG_RECEIVED.load(Ordering::Relaxed) {
             break;
         }
     }
 
-    check_nexus().await;
+    check_nexus(|n| {
+        n.nexus_list.iter().for_each(|n| {
+            assert_eq!(n.state, NexusDegraded as i32);
+        });
+    })
+    .await;
 
     queue.stop_all().await;
     ms.stop().await;
