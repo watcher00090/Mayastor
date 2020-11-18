@@ -3,13 +3,15 @@
 //! this run. For each core we are assigned we will
 //! start a job
 //!
-//!                        +-------+  nvmf +--->   MS1
-//                       |
-//           +---------+ |
-// Job  +--->+ nexus   | +-------+  nvmf +--->   MS2
-//           +---------+ |
-//                       |
-//                       +-------+  nvmf +--->   MS3
+//!                        +-------+ nvmf +--->   MS1
+//!                       |
+//!           +---------+ |
+//! Job  +--->+ nexus   | +-------+  nvmf +--->   MS2
+//!           +---------+ |
+//!                       |
+//!                       +-------+  nvmf +--->   MS3
+//!
+//!
 //!
 //! The idea is that we then "hot remove" targets while
 //! the nexus is still able to process IO.
@@ -179,6 +181,22 @@ async fn kill_replica(container: &str) {
         .unwrap();
 }
 
+async fn kill_local(container: &str) {
+    let t = DOCKER_COMPOSE.get().unwrap();
+    let mut hdl = t.grpc_handle(container).await;
+    hdl.bdev
+        .destroy(BdevUri {
+            uri: "malloc:///disk0".into(),
+        })
+        .await
+        .unwrap();
+}
+
+async fn list_bdevs(container: &str) {
+    let mut h = DOCKER_COMPOSE.get().unwrap().grpc_handle(container).await;
+    dbg!(h.bdev.list(Null {}).await.unwrap());
+}
+
 #[tokio::test]
 async fn nvmf_bdev_test() {
     let queue = Arc::new(JobQueue::new());
@@ -189,6 +207,7 @@ async fn nvmf_bdev_test() {
     // test and ensure that things do not interfere with one and other and
     // yet, still have at least more than one core such that we mimic
     // production workloads.
+    //
 
     let compose = Builder::new()
         .name("cargo-test")
@@ -217,6 +236,8 @@ async fn nvmf_bdev_test() {
     let mut ticker = interval(Duration::from_millis(1000));
     create_topology(Arc::clone(&queue)).await;
 
+    list_bdevs("ms3").await;
+
     for i in 1 .. 10 {
         ticker.tick().await;
         if i == 5 {
@@ -231,9 +252,22 @@ async fn nvmf_bdev_test() {
     check_nexus(|n| {
         n.nexus_list.iter().for_each(|n| {
             assert_eq!(n.state, NexusDegraded as i32);
+            dbg!(n);
         });
     })
     .await;
+
+    list_bdevs("ms3").await;
+
+    kill_local("ms3").await;
+
+    for _i in 1 .. 5 {
+        ticker.tick().await;
+    }
+
+    list_bdevs("ms3").await;
+
+    DOCKER_COMPOSE.get().unwrap().logs("ms3").await.unwrap();
 
     queue.stop_all().await;
     ms.stop().await;

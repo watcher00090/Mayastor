@@ -42,7 +42,7 @@ use crate::{
             instances,
             nexus_channel::{DREvent, NexusChannel, NexusChannelInner},
             nexus_child::{ChildError, ChildState, NexusChild},
-            nexus_io::{io_status, nvme_admin_opc, Bio},
+            nexus_io::{nvme_admin_opc, Bio, IoStatus, IoType},
             nexus_label::LabelError,
             nexus_nbd::{NbdDisk, NbdError},
         },
@@ -391,6 +391,7 @@ impl Nexus {
         child_bdevs: Option<&[String]>,
     ) -> Box<Self> {
         let mut b = Box::new(spdk_bdev::default());
+
         b.name = c_str!(name);
         b.product_name = c_str!(NEXUS_PRODUCT_ID);
         b.fn_table = nexus::fn_table().unwrap();
@@ -680,7 +681,7 @@ impl Nexus {
     /// determine if any of the children do not support the requested
     /// io type. Break the loop on first occurrence.
     /// TODO: optionally add this check during nexus creation
-    pub fn io_is_supported(&self, io_type: u32) -> bool {
+    pub fn io_is_supported(&self, io_type: IoType) -> bool {
         self.children
             .iter()
             .filter_map(|e| e.bdev.as_ref())
@@ -699,13 +700,13 @@ impl Nexus {
         // if any child IO has failed record this within the io context
         if !success {
             trace!(
-                "child IO {:?} ({}) of parent {:?} failed",
+                "child IO {:?} ({:#?}) of parent {:?} failed",
                 chio,
                 chio.io_type(),
                 pio
             );
 
-            pio.ctx_as_mut_ref().status = io_status::FAILED;
+            pio.ctx_as_mut_ref().status = IoStatus::Failed.into();
         }
         pio.assess(&mut chio, success);
         // always free the child IO
@@ -718,7 +719,7 @@ impl Nexus {
         let pio_ctx = pio.ctx_as_mut_ref();
 
         if !success {
-            pio_ctx.status = io_status::FAILED;
+            pio_ctx.status = IoStatus::Failed.into();
         }
 
         // As there is no child IO, perform the IO accounting that Bio::assess
@@ -727,7 +728,7 @@ impl Nexus {
         debug_assert!(pio_ctx.in_flight >= 0);
 
         if pio_ctx.in_flight == 0 {
-            if pio_ctx.status == io_status::FAILED {
+            if IoStatus::from(pio_ctx.status) == IoStatus::Failed {
                 pio_ctx.io_attempts -= 1;
                 if pio_ctx.io_attempts == 0 {
                     pio.fail();

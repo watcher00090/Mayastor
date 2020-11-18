@@ -11,6 +11,7 @@ use spdk_sys::{
 };
 
 use crate::{
+    bdev::nexus::nexus_io::Bio,
     core::{Bdev, Cores, Descriptor, DmaBuf, IoChannel, Mthread},
     ffihelper::pair,
     nexus_uri::bdev_create,
@@ -188,13 +189,16 @@ impl Job {
         let job = unsafe { ioq.job.as_mut() };
 
         if !success {
-            trace!(
-                "core: {} mthread: {:?}{}: {:#?}",
-                Cores::current(),
-                Mthread::current().unwrap(),
-                job.thread.as_ref().unwrap().name(),
-                bdev_io
-            );
+            // trace!(
+            //     "core: {} mthread: {:?}{}: {:#?}",
+            //     Cores::current(),
+            //     Mthread::current().unwrap(),
+            //     job.thread.as_ref().unwrap().name(),
+            //     bdev_io
+            // );
+
+            let bio = Bio::from(bdev_io);
+            dbg!(bio);
         }
 
         assert_eq!(Cores::current(), job.core);

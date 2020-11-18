@@ -1,11 +1,10 @@
-use once_cell::sync::OnceCell;
-
 use common::compose::{Builder, ComposeTest, MayastorTest};
 use mayastor::{
     bdev::{nexus_create, nexus_lookup},
     core::{MayastorCliArgs, Share},
     nexus_uri::bdev_destroy,
 };
+use once_cell::sync::OnceCell;
 use rpc::mayastor::{BdevShareRequest, BdevUri};
 
 pub mod common;
