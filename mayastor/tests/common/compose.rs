@@ -195,12 +195,13 @@ impl Builder {
         compose.network_id =
             compose.network_create().await.map_err(|e| e.to_string())?;
 
-        let base: usize = 2;
-        // containers are created where the IPs are ordinal
+        // containers are created where the IPs are ordinal, and we use 2 cores
+        // per container these cores overlap such that we dont have
+        // fully isolated cores
         for (i, name) in self.containers.iter().enumerate() {
             compose
                 .create_container(
-                    1 << i,
+                    1 << i | 1 << i + 1,
                     name,
                     &net.nth((i + 2) as u32).unwrap().to_string(),
                 )
