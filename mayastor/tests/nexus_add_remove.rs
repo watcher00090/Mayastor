@@ -1,14 +1,12 @@
-use std::time::Duration;
-
 use once_cell::sync::OnceCell;
 
 use common::compose::{Builder, ComposeTest, MayastorTest};
 use mayastor::{
     bdev::{nexus_create, nexus_lookup},
-    core::{mayastor_env_stop, MayastorCliArgs, Share, GLOBAL_RC},
+    core::{MayastorCliArgs, Share},
     nexus_uri::bdev_destroy,
 };
-use rpc::mayastor::{BdevShareRequest, BdevUri, CreateReply};
+use rpc::mayastor::{BdevShareRequest, BdevUri};
 
 pub mod common;
 
@@ -178,7 +176,7 @@ async fn nexus_2_way_destroy_destroy_child() {
         .get()
         .unwrap()
         .spawn(async move {
-            let n = nexus_lookup("nexus0").unwrap();
+            let _n = nexus_lookup("nexus0").unwrap();
             bdev_destroy(&format!(
                 "nvmf://{}:8420/nqn.2019-05.io.openebs:disk0",
                 hdls[0].endpoint.ip()

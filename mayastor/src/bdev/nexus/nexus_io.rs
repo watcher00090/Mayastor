@@ -173,7 +173,10 @@ impl Bio {
     #[inline]
     fn is_faulting_io_type(&self) -> bool {
         match self.io_type() {
+            io_type::FLUSH => true,
             io_type::READ => true,
+            io_type::RESET => true,
+            io_type::UNMAP => true,
             io_type::WRITE => true,
             io_type::WRITE_ZEROES => true,
             _ => false,

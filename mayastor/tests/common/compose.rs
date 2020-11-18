@@ -201,7 +201,7 @@ impl Builder {
         for (i, name) in self.containers.iter().enumerate() {
             compose
                 .create_container(
-                    1 << i | 1 << i + 1,
+                    1 << i | 1 << (i + 1),
                     name,
                     &net.nth((i + 2) as u32).unwrap().to_string(),
                 )
