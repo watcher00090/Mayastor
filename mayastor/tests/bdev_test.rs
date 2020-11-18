@@ -1,108 +1,177 @@
-use once_cell::sync::OnceCell;
-
-pub mod common;
-use common::compose::{Builder, ComposeTest, MayastorTest};
-
-use mayastor::{
-    bdev::{nexus_create, nexus_lookup},
-    core::{
-        io_driver,
-        io_driver::JobQueue,
-        Bdev,
-        MayastorCliArgs,
-        SIG_RECEIVED,
-    },
-};
-use rpc::mayastor::{BdevShareRequest, BdevUri, CreateReply};
+//!
+//! At a high level this is what is tested during
+//! this run. For each core we are assigned we will
+//! start a job
+//!
+//!                        +-------+  nvmf +--->   MS1
+//                       |
+//           +---------+ |
+// Job  +--->+ nexus   | +-------+  nvmf +--->   MS2
+//           +---------+ |
+//                       |
+//                       +-------+  nvmf +--->   MS3
+//!
+//! The idea is that we then "hot remove" targets while
+//! the nexus is still able to process IO.
+//!
+//!
+//! When we encounter an IO problem, we must reconfigure all cores, (unless we
+//! use single cores of course) and this multi core reconfiguration is what we
+//! are trying to test here, and so we require a certain amount of cores to test
+//! this to begin with. Also, typically, no more than one mayastor instance will
+//! be bound to a particular core. As such we "spread" out cores as much as
+//! possible.
 use std::{
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
+use once_cell::sync::OnceCell;
+
+const NEXUS_UUID: &str = "00000000-0000-0000-0000-000000000001";
+const NEXUS_NAME: &str = "nexus-00000000-0000-0000-0000-000000000001";
+
+use common::compose::{Builder, ComposeTest, MayastorTest};
+use mayastor::{
+    core::{
+        io_driver,
+        io_driver::JobQueue,
+        Bdev,
+        Cores,
+        MayastorCliArgs,
+        SIG_RECEIVED,
+    },
+    nexus_uri::bdev_create,
+};
+use rpc::mayastor::{
+    BdevShareRequest,
+    BdevUri,
+    CreateNexusRequest,
+    CreateReply,
+    ListNexusReply,
+    NexusState::NexusDegraded,
+    Null,
+    PublishNexusRequest,
+};
+
+use tokio::time::interval;
+
+pub mod common;
+
 static MAYASTOR: OnceCell<MayastorTest> = OnceCell::new();
 static DOCKER_COMPOSE: OnceCell<ComposeTest> = OnceCell::new();
-// this functions runs with in the context of the mayastorTest instance
-async fn create_work(queue: Arc<JobQueue>) {
-    // get a vector of grpc clients to all containers that are part of this test
-    let mut hdls = DOCKER_COMPOSE.get().unwrap().grpc_handles().await.unwrap();
 
-    // for each grpc client, invoke these methods.
-    for h in &mut hdls {
-        // create the bdev
-        h.bdev
-            .create(BdevUri {
-                uri: "malloc:///disk0?size_mb=100".into(),
-            })
-            .await
-            .unwrap();
-        // share it over nvmf
-        h.bdev
-            .share(BdevShareRequest {
-                name: "disk0".into(),
-                proto: "nvmf".into(),
-            })
-            .await
-            .unwrap();
-    }
-
-    // get a reference to mayastor (used later)
-    let ms = MAYASTOR.get().unwrap();
-
-    // have ms create our nexus to the targets created above to know the IPs of
-    // the mayastor instances that run in the container, the handles can be
-    // used. This avoids hardcoded IPs and having magic constants.
-    ms.spawn(async move {
-        nexus_create(
-            "nexus0",
-            1024 * 1024 * 50,
-            None,
-            &[
-                format!(
-                    "nvmf://{}:8420/nqn.2019-05.io.openebs:disk0",
-                    hdls[0].endpoint.ip()
-                ),
-                format!(
-                    "nvmf://{}:8420/nqn.2019-05.io.openebs:disk0",
-                    hdls[1].endpoint.ip()
-                ),
-            ],
-        )
+/// create a malloc bdev and export them over nvmf, returns the URI of the
+/// constructed target.
+async fn create_target(container: &str) -> String {
+    let mut h = DOCKER_COMPOSE.get().unwrap().grpc_handle(container).await;
+    h.bdev
+        .create(BdevUri {
+            uri: "malloc:///disk0?size_mb=100".into(),
+        })
+        .await
+        .unwrap();
+    // share it over nvmf
+    let ep = h
+        .bdev
+        .share(BdevShareRequest {
+            name: "disk0".into(),
+            proto: "nvmf".into(),
+        })
         .await
         .unwrap();
 
-        let bdev = Bdev::lookup_by_name("nexus0").unwrap();
-
-        // create a job using the bdev we looked up, we are in the context here
-        // of the ms instance and not the containers.
-        let job = io_driver::Builder::new()
-            .core(1)
-            .bdev(bdev)
-            .qd(64)
-            .io_size(512)
-            .build()
-            .await;
-
-        // start the first job
-        queue.start(job);
-
-        let bdev = Bdev::lookup_by_name("nexus0").unwrap();
-        let job = io_driver::Builder::new()
-            .core(0)
-            .bdev(bdev)
-            .qd(64)
-            .io_size(512)
-            .build()
-            .await;
-
-        // start the first job
-        queue.start(job);
-    })
-    .await
+    ep.into_inner().uri
 }
 
-async fn kill_replica() {
+/// create a local malloc bdev, and then use it to create a nexus with the
+/// remote targets added. This reflects the current approach where we have
+/// children as: bdev:/// and nvmf:// we really should get rid of this
+/// asymmetrical composition if we can.
+async fn create_nexus(container: &str, mut kiddos: Vec<String>) -> String {
+    let mut h = DOCKER_COMPOSE.get().unwrap().grpc_handle(container).await;
+
+    let bdev = h
+        .bdev
+        .create(BdevUri {
+            uri: "malloc:///disk0?size_mb=100".into(),
+        })
+        .await
+        .unwrap();
+
+    kiddos.push(format!("bdev:///{}", bdev.into_inner().name));
+
+    h.mayastor
+        .create_nexus(CreateNexusRequest {
+            uuid: NEXUS_UUID.to_string(),
+            size: 96 * 1024 * 1024,
+            children: kiddos,
+        })
+        .await
+        .unwrap();
+
+    let endpoint = h
+        .mayastor
+        .publish_nexus(PublishNexusRequest {
+            uuid: NEXUS_UUID.into(),
+            share: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    endpoint.into_inner().device_uri
+}
+
+/// create the work -- which means the nexus, replica's and the jobs. on return
+/// IO flows through mayastorTest to all 3 containers
+async fn create_topology(queue: Arc<JobQueue>) {
+    let r1 = create_target("ms1").await;
+    let r2 = create_target("ms2").await;
+    let endpoint = create_nexus("ms3", vec![r1, r2]).await;
+
+    // the nexus is running on ms3 we will use a 4th instance of mayastor to
+    // create a nvmf bdev and push IO to it.
+
+    let ms = MAYASTOR.get().unwrap();
+    let bdev = ms
+        .spawn(async move {
+            let bdev = bdev_create(&endpoint).await.unwrap();
+            bdev
+        })
+        .await;
+
+    // start the workload by running a job on each core, this simulates the way
+    // the targets use multiple cores
+    ms.spawn(async move {
+        for c in Cores::count() {
+            let bdev = Bdev::lookup_by_name(&bdev).unwrap();
+            let job = io_driver::Builder::new()
+                .core(c)
+                .bdev(bdev)
+                .qd(64)
+                .io_size(512)
+                .build()
+                .await;
+
+            queue.start(job);
+        }
+    })
+    .await;
+}
+
+async fn check_nexus<F: FnOnce(ListNexusReply)>(checker: F) {
+    let mut ms3 = DOCKER_COMPOSE.get().unwrap().grpc_handle("ms3").await;
+    let list = ms3.mayastor.list_nexus(Null {}).await.unwrap().into_inner();
+    checker(list)
+}
+
+/// kill replica issues an unshare to the container which more or less amounts
+/// to the same thing as killing the container.
+async fn kill_replica(container: &str) {
     let t = DOCKER_COMPOSE.get().unwrap();
-    let mut hdl = t.grpc_handle("ms1").await;
+    let mut hdl = t.grpc_handle(container).await;
+
     hdl.bdev
         .unshare(CreateReply {
             name: "disk0".to_string(),
@@ -115,63 +184,61 @@ async fn kill_replica() {
 async fn nvmf_bdev_test() {
     let queue = Arc::new(JobQueue::new());
 
-    // create the docker containers
+    // create the docker containers each container started with two adjacent CPU
+    // cores. ms1 will have core mask 0x3, ms3 will have core mask 0xc and so
+    // on. the justification for this enormous core spreading is we want to
+    // test and ensure that things do not interfere with one and other and
+    // yet, still have at least more than one core such that we mimic
+    // production workloads.
+
     let compose = Builder::new()
         .name("cargo-test")
         .network("10.1.0.0/16")
         .add_container("ms1")
         .add_container("ms2")
+        .add_container("ms3")
         .with_clean(true)
         .with_prune(true)
         .build()
         .await
         .unwrap();
 
-    // create the mayastor test instance
+    DOCKER_COMPOSE.set(compose).unwrap();
+    // this is based on the number of containers above.
+    let mask = format!("{:#01x}", (1 << 4) | (1 << 5));
     let ms = MayastorTest::new(MayastorCliArgs {
-        log_components: vec!["all".into()],
-        reactor_mask: "0x3".to_string(),
+        reactor_mask: mask,
         no_pci: true,
         grpc_endpoint: "0.0.0.0".to_string(),
         ..Default::default()
     });
 
-    DOCKER_COMPOSE.set(compose).unwrap();
-
     let ms = MAYASTOR.get_or_init(|| ms);
 
-    create_work(Arc::clone(&queue)).await;
-    let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+    let mut ticker = interval(Duration::from_millis(1000));
+    create_topology(Arc::clone(&queue)).await;
+
     for i in 1 .. 10 {
         ticker.tick().await;
-
         if i == 5 {
-            kill_replica().await;
+            kill_replica("ms1").await;
         }
-
-        ms.spawn(async move {
-            let bdev = Bdev::bdev_first().unwrap().into_iter();
-            for b in bdev {
-                let result = b.stats().await.unwrap();
-                println!("{}: {:?}", b.name(), result);
-            }
-        })
-        .await;
-
-        // ctrl was hit
+        // ctrl was hit so exit the loop here
         if SIG_RECEIVED.load(Ordering::Relaxed) {
             break;
         }
     }
 
-    queue.stop_all().await;
+    check_nexus(|n| {
+        n.nexus_list.iter().for_each(|n| {
+            assert_eq!(n.state, NexusDegraded as i32);
+        });
+    })
+    .await;
 
-    // ctrl-c was hit do not destroy the nexus
-    if !SIG_RECEIVED.load(Ordering::Relaxed) {
-        ms.spawn(nexus_lookup("nexus0").unwrap().destroy())
-            .await
-            .unwrap();
-    }
+    queue.stop_all().await;
+    ms.stop().await;
+    //DOCKER_COMPOSE.get().unwrap().logs("ms1").await.unwrap();
     // now we manually destroy the docker containers
     DOCKER_COMPOSE.get().unwrap().down().await;
 }

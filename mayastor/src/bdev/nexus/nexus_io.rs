@@ -23,6 +23,7 @@ use crate::{
         },
         nexus_lookup,
         ChildState,
+        NexusStatus,
         Reason,
     },
     core::{Bdev, Cores, Mthread, Reactors},
@@ -211,14 +212,20 @@ impl Bio {
 
                     let name = n.name.clone();
                     let uri = child.name.clone();
+
                     let fut = async move {
                         if let Some(nexus) = nexus_lookup(&name) {
                             nexus.pause().await.unwrap();
                             nexus.reconfigure(DREvent::ChildFault).await;
                             bdev_destroy(&uri).await.unwrap();
-                            nexus.resume().await.unwrap();
+                            if nexus.status() != NexusStatus::Faulted {
+                                nexus.resume().await.unwrap();
+                            } else {
+                                error!(":{} has no children left... ", nexus);
+                            }
                         }
                     };
+
                     Reactors::master().send_future(fut);
                 }
             } else {
@@ -252,6 +259,7 @@ impl Bio {
         assert_eq!(b.product_name(), NEXUS_PRODUCT_ID);
         unsafe { Nexus::from_raw((*b.as_ptr()).ctxt) }
     }
+
     /// get the context of the given IO, which is used to determine the overall
     /// state of the IO.
     #[inline]

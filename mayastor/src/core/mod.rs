@@ -14,6 +14,7 @@ pub use env::{
     mayastor_env_stop,
     MayastorCliArgs,
     MayastorEnvironment,
+    GLOBAL_RC,
     SIG_RECEIVED,
 };
 
