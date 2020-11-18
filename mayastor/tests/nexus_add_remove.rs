@@ -1,14 +1,11 @@
-use std::time::Duration;
-
-use once_cell::sync::OnceCell;
-
 use common::compose::{Builder, ComposeTest, MayastorTest};
 use mayastor::{
     bdev::{nexus_create, nexus_lookup},
-    core::{mayastor_env_stop, MayastorCliArgs, Share, GLOBAL_RC},
+    core::{MayastorCliArgs, Share},
     nexus_uri::bdev_destroy,
 };
-use rpc::mayastor::{BdevShareRequest, BdevUri, CreateReply};
+use once_cell::sync::OnceCell;
+use rpc::mayastor::{BdevShareRequest, BdevUri};
 
 pub mod common;
 

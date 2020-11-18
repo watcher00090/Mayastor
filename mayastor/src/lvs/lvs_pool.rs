@@ -30,7 +30,7 @@ use spdk_sys::{
 use url::Url;
 
 use crate::{
-    bdev::{util::uring, Uri},
+    bdev::{nexus::nexus_io::IoType, util::uring, Uri},
     core::{Bdev, Share, Uuid},
     ffihelper::{cb_arg, pair, AsStr, ErrnoResult, FfiResult, IntoCString},
     lvs::{Error, Lvol, PropName, PropValue},
@@ -522,12 +522,12 @@ impl Lvs {
         size: u64,
         thin: bool,
     ) -> Result<Lvol, Error> {
-        let clear_method =
-            if self.base_bdev().io_type_supported(SPDK_BDEV_IO_TYPE_UNMAP) {
-                LVOL_CLEAR_WITH_UNMAP
-            } else {
-                LVOL_CLEAR_WITH_WRITE_ZEROES
-            };
+        let clear_method = if self.base_bdev().io_type_supported(IoType::Unmap)
+        {
+            LVOL_CLEAR_WITH_UNMAP
+        } else {
+            LVOL_CLEAR_WITH_WRITE_ZEROES
+        };
 
         if Bdev::lookup_by_name(name).is_some() {
             return Err(Error::RepExists {
