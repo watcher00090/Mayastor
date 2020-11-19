@@ -1,32 +1,60 @@
 // Volume object abstracts user from volume components nexus and
 // replicas and implements algorithms for volume recovery.
 
-'use strict';
+import assert from 'assert';
+import * as _ from 'lodash';
+import { Replica } from './replica';
+import { Child, Nexus, Protocol } from './nexus';
+import { Pool } from './pool';
 
-const _ = require('lodash');
-const assert = require('assert');
 const log = require('./logger').Logger('volume');
 const { GrpcCode, GrpcError } = require('./grpc_client');
+
+// State of the volume
+export enum VolumeState {
+  Unknown = "unknown",
+  Pending = "pending",
+  Destroyed = "destroyed",
+  Healthy = "healthy",
+  Degraded = "degraded",
+  Faulted = "faulted",
+}
 
 // Abstraction of the volume. It is an abstract object which consists of
 // physical entities nexus and replicas. It provides high level methods
 // for doing operations on the volume as well as recovery algorithms for
 // maintaining desired redundancy.
-class Volume {
+export class Volume {
+  // volume spec properties
+  private uuid: string;
+  private replicaCount: number;
+  private preferredNodes: string[];
+  private requiredNodes: string[];
+  private requiredBytes: number;
+  private limitBytes: number;
+  private protocol: Protocol;
+  // volume status properties
+  private size: number;
+  private nexus: Nexus | null;
+  private replicas: Record<string, Replica>; // replicas indexed by node name
+  private state: VolumeState;
+  private registry: any;
+  private runFsa: number; // number of requests to run FSA
+
   // Construct a volume object with given uuid.
   //
-  // @params {string}   uuid                 ID of the volume.
-  // @params {object}   registry             Registry object.
-  // @params {object}   spec                 Volume parameters.
-  // @params {number}   spec.replicaCount    Number of desired replicas.
-  // @params {string[]} spec.preferredNodes  Nodes to prefer for scheduling replicas.
-  // @params {string[]} spec.requiredNodes   Replicas must be on these nodes.
-  // @params {number}   spec.requiredBytes   The volume must have at least this size.
-  // @params {number}   spec.limitBytes      The volume should not be bigger than this.
-  // @params {string}   spec.protocol        The share protocol for the nexus.
-  // @params {object}   [size=0]             Current properties of the volume.
+  // @params uuid                 ID of the volume.
+  // @params registry             Registry object.
+  // @params spec                 Volume parameters.
+  // @params spec.replicaCount    Number of desired replicas.
+  // @params spec.preferredNodes  Nodes to prefer for scheduling replicas.
+  // @params spec.requiredNodes   Replicas must be on these nodes.
+  // @params spec.requiredBytes   The volume must have at least this size.
+  // @params spec.limitBytes      The volume should not be bigger than this.
+  // @params spec.protocol        The share protocol for the nexus.
+  // @params [size]               Current properties of the volume.
   //
-  constructor (uuid, registry, spec, size = 0) {
+  constructor(uuid: string, registry: any, spec: any, size?: number) {
     assert(spec);
     // specification of the volume
     this.uuid = uuid;
@@ -37,54 +65,71 @@ class Volume {
     this.requiredBytes = spec.requiredBytes;
     this.limitBytes = spec.limitBytes;
     this.protocol = spec.protocol;
-    this.size = size;
+    this.size = size || 0;
     // state variables of the volume
     this.nexus = null;
-    this.replicas = {}; // replicas indexed by node name
-    this.state = 'pending';
-    this.runFsa = 0; // number of requests to run FSA
+    this.replicas = {};
+    this.state = VolumeState.Pending;
+    this.runFsa = 0;
   }
 
   // Stringify volume
-  toString () {
+  toString(): string {
     return this.uuid;
   }
 
   // Get the size of the volume.
-  getSize () {
+  getSize(): number {
     return this.size;
   }
 
-  // Get the node which the volume is accessible from
-  // (currently that is where the nexus is).
-  getNodeName () {
-    return this.nexus ? this.nexus.node.name : '';
+  // Get the node where the volume is accessible from (that is the node with
+  // the nexus) or undefined when nexus does not exist (unpublished published).
+  getNodeName(): string | undefined {
+    return this.nexus?.node.name;
   }
 
-  // Publish the volume. That means make it accessible through a block device.
-  // @params {string}   protocol      The nexus share protocol.
-  // @return {string}   uri           The URI to access the nexus.
-  async publish (protocol) {
-    if (this.nexus) {
-      const uri = await this.nexus.publish(protocol);
-      return uri;
-    } else {
+  // Publish the volume. That means, make it accessible through a block device.
+  //
+  // @params protocol      The nexus share protocol.
+  // @return uri           The URI to access the nexus.
+  async publish(protocol: Protocol): Promise<string> {
+    if (this.state !== VolumeState.Degraded && this.state !== VolumeState.Healthy) {
       throw new GrpcError(
         GrpcCode.INTERNAL,
-        'Cannot publish a volume without nexus'
+        'Cannot publish a volume that is neither healthy nor degraded'
       );
     }
+    let nexus = this.nexus;
+    if (!nexus) {
+      // Ensure replicas can be accessed from nexus. Set share protocols.
+      const replicaSet = await this._ensureReplicaShareProtocols();
+
+      if (!this.size) {
+        // the size will be the smallest replica
+        this.size = Object.values(this.replicas)
+          .map((r) => r.size)
+          .reduce((acc, cur) => (cur < acc ? cur : acc), Number.MAX_SAFE_INTEGER);
+      }
+      // create a new nexus with children (replicas) created in previous steps
+      // XXX filter out replicas that are not online
+      nexus = await this._createNexus(replicaSet);
+    }
+    let uri = nexus.getUri();
+    if (!uri) {
+      uri = await nexus.publish(protocol);
+    }
+    log.info(`Published "${this}" at ${uri}`);
+    return uri;
   }
 
   // Undo publish operation on the volume.
-  async unpublish () {
+  async unpublish() {
     if (this.nexus) {
-      await this.nexus.unpublish();
-    } else {
-      throw new GrpcError(
-        GrpcCode.INTERNAL,
-        'Cannot unpublish a volume without nexus'
-      );
+      if (this.nexus.getUri()) {
+        await this.nexus.unpublish();
+      }
+      await this.nexus.destroy();
     }
   }
 
@@ -118,88 +163,125 @@ class Volume {
   }
 
   // Implementation of finite state automaton (FSA) that moves the volume
-  // through states: pending, degraded, faulted, healthy - trying to preserve
+  // through the states: degraded, faulted, healthy, ... - trying to preserve
   // data on volume "no matter what".
   async _fsa () {
-    if (!this.nexus) {
-      // nexus does not exist yet - nothing to do
-      assert.strictEqual(this.state, 'pending');
+    // If the volume is being created, FSA should not interfere.
+    if (this.state === VolumeState.Pending) {
       return;
     }
     log.debug(`Volume "${this}" enters FSA in ${this.state} state`);
 
-    if (this.nexus.state === 'NEXUS_OFFLINE') {
-      // if nexus is not accessible then the information about children is stale
-      // and we cannot make any reasonable decisions, so bail out.
-      this._setState('offline');
-      return;
+    if (!this.nexus) {
+      // if none of the replicas is usable then there is nothing we can do
+      if (Object.values(this.replicas).filter((r) => !r.isOffline()).length == 0) {
+        this._setState(VolumeState.Faulted);
+        return;
+      }
+
+      // check number of replicas for the volume
+      const newReplicaCount = this.replicaCount - Object.values(this.replicas).length;
+      if (newReplicaCount > 0) {
+        this._setState(VolumeState.Degraded);
+        try {
+          await this._createReplicas(newReplicaCount);
+        } catch (err) {
+          // XXX blacklist the pool and use a different one next time
+          log.error(err.toString());
+        }
+        // New replicas will be added to the volume through events. On next fsa
+        // enter they will be there and we may continue beyound this point then.
+        return;
+      }
+
+      if (!this.publishedOn) {
+        // If the volume hasn't been published we can't do anything more than what
+        // we have done (that is maintain required # of replicas). When we create
+        // the nexus, it may find out that some of the replicas are unusable, but
+        // we don't know that now.
+        this._setState(VolumeState.Healthy);
+        return;
+      }
     }
 
-    // check that replicas are shared as they should be
+    // check that replicas are shared in the way they should be
+    let localNode = (this.nexus) ? this.nexus.node : this.publishedOn;
     for (const nodeName in this.replicas) {
       const replica = this.replicas[nodeName];
-      if (!replica.isOffline()) {
-        let share;
-        const local = replica.pool.node === this.nexus.node;
+      if (replica.isOffline()) {
+        continue;
+      }
+      let share;
+      const isLocal = replica.pool!.node === localNode;
+      if (isLocal && replica.share !== 'REPLICA_NONE') {
         // make sure that replica that is local to the nexus is accessed locally
-        if (local && replica.share !== 'REPLICA_NONE') {
-          share = 'REPLICA_NONE';
-        } else if (!local && replica.share === 'REPLICA_NONE') {
-          // make sure that replica that is remote to nexus can be accessed
-          share = 'REPLICA_NVMF';
-        }
-        if (share) {
-          try {
-            await replica.setShare(share);
-            // fsa will get called again because the replica was modified
-            return;
-          } catch (err) {
-            throw new GrpcError(
-              GrpcCode.INTERNAL,
-              `Failed to set share protocol to ${share} for replica "${replica}": ${err}`
-            );
-          }
+        share = 'REPLICA_NONE';
+      } else if (!isLocal && replica.share === 'REPLICA_NONE') {
+        // make sure that replica that is remote to nexus can be accessed
+        share = 'REPLICA_NVMF';
+      }
+      if (share) {
+        try {
+          await replica.setShare(share);
+          // fsa will get called again because the replica was modified
+          return;
+        } catch (err) {
+          // XXX mark the replica somehow so that it is not used? Blacklist on volume!
+          log.error(
+            `Failed to set share protocol to ${share} for replica "${replica}": ${err}`
+          );
         }
       }
     }
+
+    if (!this.nexus) {
+      try {
+        this._createNexus(Object.values(this.replicas).filter((r) => !r.isOffline()));
+      } catch (err) {
+        log.error(`Failed to create nexus for ${this} on ${this.publishedOn}`);
+      }
+      // fsa will get called again when event about created nexus arrives
+      return;
+    }
+
     // pair nexus children with replica objects to get the full picture
-    var self = this;
-    const children = this.nexus.children.map((ch) => {
-      return {
-        uri: ch.uri,
-        state: ch.state,
-        replica: Object.values(self.replicas).find((r) => r.uri === ch.uri)
-      };
+    const childReplicaPairs: {ch: Child, r: Replica | undefined}[] = this.nexus.children.map((ch) => {
+      const r = Object.values(this.replicas).find((r) => r.uri === ch.uri);
+      return {ch, r};
     });
     // add newly found replicas to the nexus (one by one)
     const newReplica = Object.values(this.replicas).filter(
-      (r) => !r.isOffline() && !children.find((ch) => ch.replica === r)
+      (r) => !r.isOffline() && !childReplicaPairs.find((pair) => pair.r === r)
     )[0];
     if (newReplica) {
       try {
         await this.nexus.addReplica(newReplica);
       } catch (err) {
+        // XXX blacklist the replica
         log.error(err.toString());
       }
       return;
     }
 
-    // If there is not a single replica that is online then there is no hope
+    // If there is not a single child that is online then there is no hope
     // that we could rebuild anything.
-    var onlineCount = children.filter((ch) => ch.state === 'CHILD_ONLINE')
+    var onlineCount = childReplicaPairs
+      .filter((pair) => pair.ch.state === 'CHILD_ONLINE')
       .length;
     if (onlineCount === 0) {
-      this._setState('faulted');
+      this._setState(VolumeState.Faulted);
       return;
     }
 
+    // XXX publish the nexus if needed
+
     // If we don't have sufficient number of sound replicas (sound means online
-    // , under rebuild or pending) then add a new one.
-    var soundCount = children.filter((ch) => {
-      return ['CHILD_ONLINE', 'CHILD_DEGRADED'].indexOf(ch.state) >= 0;
+    // or under rebuild) then add a new one.
+    var soundCount = childReplicaPairs.filter((pair) => {
+      return ['CHILD_ONLINE', 'CHILD_DEGRADED'].indexOf(pair.ch.state) >= 0;
     }).length;
     if (this.replicaCount > soundCount) {
-      this._setState('degraded');
+      this._setState(VolumeState.Degraded);
       // add new replica
       try {
         await this._createReplicas(this.replicaCount - soundCount);
@@ -213,48 +295,53 @@ class Volume {
 
     // The condition for later actions is that volume must not be rebuilding or
     // waiting for a child add. So check that and return if that's the case.
-    var rebuildCount = children.filter((ch) => ch.state === 'CHILD_DEGRADED').length;
+    var rebuildCount = childReplicaPairs
+      .filter((pair) => pair.ch.state === 'CHILD_DEGRADED')
+      .length;
     if (rebuildCount > 0) {
-      this._setState('degraded');
+      this._setState(VolumeState.Degraded);
       return;
     }
 
     assert(onlineCount >= this.replicaCount);
-    this._setState('healthy');
+    this._setState(VolumeState.Healthy);
 
     // If we have more online replicas then we need to, then remove one.
-    // Child that is broken and without a replica is a good fit for removal.
-    let rmChild = children.find(
-      (ch) => !ch.replica && ch.state === 'CHILD_FAULTED'
+    // Child that is broken or without a replica goes first.
+    let rmPair = childReplicaPairs.find(
+      (pair) => !pair.r && pair.ch.state === 'CHILD_FAULTED'
     );
-    if (!rmChild) {
-      rmChild = children.find((ch) => ch.state === 'CHILD_FAULTED');
-      if (!rmChild) {
+    if (!rmPair) {
+      rmPair = childReplicaPairs.find((pair) => pair.ch.state === 'CHILD_FAULTED');
+      if (!rmPair) {
+        // XXX inspect the blacklist
         // A child that is unknown to us (without replica object)
-        rmChild = children.find((ch) => !ch.replica);
+        rmPair = childReplicaPairs.find((pair) => !pair.r);
         // If all replicas are online, then continue searching for a candidate
         // only if there are more online replicas than it needs to be.
-        if (!rmChild && onlineCount > this.replicaCount) {
+        if (!rmPair && onlineCount > this.replicaCount) {
           // The replica with the lowest score must go away
           const rmReplica = this._prioritizeReplicas(
-            children.map((ch) => ch.replica)
+            <Replica[]> childReplicaPairs
+              .map((pair) => pair.r)
+              .filter((r) => r !== undefined)
           ).pop();
           if (rmReplica) {
-            rmChild = children.find((ch) => ch.replica === rmReplica);
+            rmPair = childReplicaPairs.find((pair) => pair.r === rmReplica);
           }
         }
       }
     }
-    if (rmChild) {
+    if (rmPair) {
       try {
-        await this.nexus.removeReplica(rmChild.uri);
+        await this.nexus.removeReplica(rmPair.ch.uri);
       } catch (err) {
         log.error(err.toString());
         return;
       }
-      if (rmChild.replica) {
+      if (rmPair.r) {
         try {
-          await rmChild.replica.destroy();
+          await rmPair.r.destroy();
         } catch (err) {
           log.error(err.toString());
         }
@@ -263,14 +350,14 @@ class Volume {
     }
 
     // If a replica should run on a different node then move it
-    var moveChild = children.find((ch) => {
+    var moveChild = childReplicaPairs.find((pair) => {
       if (
-        ch.replica &&
-        ch.state === 'CHILD_ONLINE' &&
-        self.requiredNodes.length > 0 &&
-        self.requiredNodes.indexOf(ch.replica.pool.node.name) < 0
+        pair.r &&
+        pair.ch.state === 'CHILD_ONLINE' &&
+        this.requiredNodes.length > 0 &&
+        this.requiredNodes.indexOf(pair.r.pool!.node.name) < 0
       ) {
-        if (self.requiredNodes.indexOf(ch.replica.pool.node.name) < 0) {
+        if (this.requiredNodes.indexOf(pair.r.pool!.node.name) < 0) {
           return true;
         }
       }
@@ -298,8 +385,8 @@ class Volume {
   // replace our ad-hoc message bus by something better what allows us to store
   // the reference to message channel in every volume.
   //
-  // @param {string} newState   New state to set on volume.
-  _setState (newState) {
+  // @param newState   New state to set on volume.
+  _setState(newState: VolumeState) {
     if (this.state !== newState) {
       if (newState === 'healthy') {
         log.info(`Volume "${this}" is ${newState}`);
@@ -314,44 +401,21 @@ class Volume {
   // object creation. Create whatever component is missing (note that we
   // might not be creating it from the scratch).
   //
-  // NOTE: Until we create a nexus at the end, the volume is not acted upon by FSA.
-  // When "new nexus" event comes in, that moves it from pending state and kicks
-  // off FSA. Exactly what we want, because the async events produced by this
-  // function do not interfere with execution of the "create".
-  async create () {
+  // NOTE: Until we switch state from "pending" at the end, the volume is not
+  // acted upon by FSA. That's exactly what we want, because the async events
+  // produced by this function do not interfere with execution of the "create".
+  async create() {
     log.debug(`Creating the volume "${this}"`);
     assert(!this.nexus);
 
     // Ensure there is sufficient number of replicas for the volume.
-    // TODO: take replica state into account
     const newReplicaCount = this.replicaCount - Object.keys(this.replicas).length;
     if (newReplicaCount > 0) {
       // create more replicas if higher replication factor is desired
       await this._createReplicas(newReplicaCount);
     }
-
-    // Ensure replicas can be accessed from nexus. Set share protocols.
-    const replicaSet = await this._ensureReplicaShareProtocols();
-
-    // If the nexus poped up while we were creating replicas pick it up now.
-    // Though it's an unsual situation so we log a warning if it happens.
-    const nexus = this.registry.getNexus(this.uuid);
-    if (nexus) {
-      log.warn(
-        `The nexus "${nexus}" appeared while creating replicas - using it`
-      );
-      this.newNexus(nexus);
-      return;
-    }
-    if (!this.size) {
-      // the size will be the smallest replica
-      this.size = Object.values(this.replicas)
-        .map((r) => r.size)
-        .reduce((acc, cur) => (cur < acc ? cur : acc), Number.MAX_SAFE_INTEGER);
-    }
-    // create a new nexus with children (replicas) created in previous steps
-    this.nexus = await this._createNexus(replicaSet);
-    log.info(`Volume "${this}" with size ${this.size} was created`);
+    this._setState(VolumeState.Healthy);
+    log.info(`Volume "${this}" with ${this.replicaCount} replica(s) and size ${this.size} was created`);
   }
 
   // Update child devices of existing nexus or create a new nexus if it does not
@@ -360,11 +424,12 @@ class Volume {
   // @param {object[]} replicas   Replicas that should be used for child bdevs of nexus.
   // @returns {object} Created nexus object.
   //
-  async _createNexus (replicas) {
+  async _createNexus(replicas: Replica[], node?: string): Promise<Nexus> {
     // create a new nexus
     const localReplica = Object.values(this.replicas).find(
       (r) => r.share === 'REPLICA_NONE'
     );
+    // XXX this needs to change
     if (!localReplica) {
       // should not happen but who knows ..
       throw new GrpcError(
@@ -372,7 +437,7 @@ class Volume {
         'Cannot create nexus if none of the replicas is local'
       );
     }
-    return localReplica.pool.node.createNexus(
+    return localReplica.pool!.node.createNexus(
       this.uuid,
       this.size,
       Object.values(replicas)
@@ -381,12 +446,10 @@ class Volume {
 
   // Adjust replica count for the volume to required count.
   //
-  // TODO: Take into account state of replicas.
+  // @param count   Number of new replicas to create.
   //
-  // @param {number} newCount   Number of new replicas to create.
-  //
-  async _createReplicas (count) {
-    let pools = this.registry.choosePools(
+  async _createReplicas(count: number) {
+    let pools: Pool[] = this.registry.choosePools(
       this.requiredBytes,
       this.requiredNodes,
       this.preferredNodes
@@ -448,10 +511,10 @@ class Volume {
   //
   // @returns {object[]}  List of replicas sorted by preference (the most first).
   //
-  _prioritizeReplicas (replicas) {
-    const self = this;
+  _prioritizeReplicas(replicas: Replica[]): Replica[] {
+    // Object.values clones the array so that we don't modify the original value
     return Object.values(replicas).sort(
-      (a, b) => self._scoreReplica(b) - self._scoreReplica(a)
+      (a, b) => this._scoreReplica(b) - this._scoreReplica(a)
     );
   }
 
@@ -460,9 +523,9 @@ class Volume {
   // @param   {object} replica  Replica object.
   // @returns {number} Score from 0 to 18.
   //
-  _scoreReplica (replica) {
+  _scoreReplica (replica: Replica) {
     let score = 0;
-    const node = replica.pool.node;
+    const node = replica.pool!.node;
 
     // criteria #1: must be on the required nodes if set
     if (
@@ -498,7 +561,7 @@ class Volume {
   //
   // @returns {object[]} Replicas that should be used for nexus sorted by preference.
   //
-  async _ensureReplicaShareProtocols () {
+  async _ensureReplicaShareProtocols(): Promise<Replica[]> {
     // If nexus does not exist it will be created on the same node as the most
     // preferred replica.
     const replicaSet = this._prioritizeReplicas(Object.values(this.replicas));
@@ -510,12 +573,12 @@ class Volume {
     }
     replicaSet.splice(this.replicaCount);
 
-    const nexusNode = this.nexus ? this.nexus.node : replicaSet[0].pool.node;
+    const nexusNode = this.nexus ? this.nexus.node : replicaSet[0].pool!.node;
 
     for (let i = 0; i < replicaSet.length; i++) {
       const replica = replicaSet[i];
       let share;
-      const local = replica.pool.node === nexusNode;
+      const local = replica.pool!.node === nexusNode;
       // make sure that replica which is local to the nexus is accessed locally
       if (local && replica.share !== 'REPLICA_NONE') {
         share = 'REPLICA_NONE';
@@ -551,7 +614,7 @@ class Volume {
   // @params {string}   spec.protocol        The share protocol for the nexus.
   // @returns {boolean} True if the volume spec has changed, false otherwise.
   //
-  update (spec) {
+  update(spec: any) {
     var changed = false;
 
     if (this.size < spec.requiredBytes) {
@@ -605,9 +668,9 @@ class Volume {
   // Add new replica to the volume.
   //
   // @param {object} replica   New replica object.
-  newReplica (replica) {
+  newReplica(replica: Replica) {
     assert(replica.uuid === this.uuid);
-    const nodeName = replica.pool.node.name;
+    const nodeName = replica.pool!.node.name;
     if (this.replicas[nodeName]) {
       log.warn(
         `Trying to add the same replica "${replica}" to the volume twice`
@@ -622,9 +685,9 @@ class Volume {
   // Modify replica in the volume.
   //
   // @param {object} replica   Modified replica object.
-  modReplica (replica) {
+  modReplica(replica: Replica) {
     assert.strictEqual(replica.uuid, this.uuid);
-    const nodeName = replica.pool.node.name;
+    const nodeName = replica.pool!.node.name;
     if (!this.replicas[nodeName]) {
       log.warn(`Modified replica "${replica}" does not belong to the volume`);
     } else {
@@ -637,9 +700,9 @@ class Volume {
   // Delete replica in the volume.
   //
   // @param {object} replica   Deleted replica object.
-  delReplica (replica) {
+  delReplica(replica: Replica) {
     assert.strictEqual(replica.uuid, this.uuid);
-    const nodeName = replica.pool.node.name;
+    const nodeName = replica.pool!.node.name;
     if (!this.replicas[nodeName]) {
       log.warn(`Deleted replica "${replica}" does not belong to the volume`);
     } else {
@@ -653,7 +716,7 @@ class Volume {
   // Assign nexus to the volume.
   //
   // @param {object} nexus   New nexus object.
-  newNexus (nexus) {
+  newNexus(nexus: Nexus) {
     assert.strictEqual(nexus.uuid, this.uuid);
     if (this.nexus) {
       log.warn(`Trying to add nexus "${nexus}" to the volume twice`);
@@ -669,7 +732,7 @@ class Volume {
   // Nexus has been modified.
   //
   // @param {object} nexus   Modified nexus object.
-  modNexus (nexus) {
+  modNexus(nexus: Nexus) {
     assert.strictEqual(nexus.uuid, this.uuid);
     if (!this.nexus) {
       log.warn(`Modified nexus "${nexus}" does not belong to the volume`);
@@ -682,7 +745,7 @@ class Volume {
   // Delete nexus in the volume.
   //
   // @param {object} nexus   Deleted nexus object.
-  delNexus (nexus) {
+  delNexus(nexus: Nexus) {
     assert.strictEqual(nexus.uuid, this.uuid);
     if (!this.nexus) {
       log.warn(`Deleted nexus "${nexus}" does not belong to the volume`);
@@ -692,9 +755,7 @@ class Volume {
       this.nexus = null;
       // this brings up back to a starting state. No FSA transitions are
       // possible after this point unless we receive new nexus event again.
-      this._setState('pending');
+      this._setState(VolumeState.Pending);
     }
   }
 }
-
-module.exports = Volume;

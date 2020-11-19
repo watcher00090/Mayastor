@@ -55,6 +55,7 @@ import {
   CustomResourceCache,
   CustomResourceMeta,
 } from './watcher';
+import { Protocol, protocolFromString } from './nexus';
 
 const RESOURCE_NAME: string = 'mayastorvolume';
 const crdVolume = yaml.safeLoad(
@@ -62,26 +63,6 @@ const crdVolume = yaml.safeLoad(
 );
 // lower-case letters uuid pattern
 const uuidRegexp = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-5][0-9a-f]{3}-[089ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-// Protocol used to export nexus (volume)
-enum Protocol {
-  Unknown = 'unknown',
-  Nbd = 'nbd',
-  Iscsi = 'iscsi',
-  Nvmf = 'nvmf',
-}
-
-function protocolFromString(val: string): Protocol {
-  if (val == Protocol.Nbd) {
-    return Protocol.Nbd;
-  } else if (val == Protocol.Iscsi) {
-    return Protocol.Iscsi;
-  } else if (val == Protocol.Nvmf) {
-    return Protocol.Nvmf;
-  } else {
-    return Protocol.Unknown;
-  }
-}
 
 // State of the volume
 enum State {
@@ -127,7 +108,7 @@ type VolumeStatus = {
   size: number,
   state: State,
   reason?: string,
-  node: string,
+  node: string, // special meaning of the field is that vol is published if set
   replicas: {
     node: string,
     pool: string,

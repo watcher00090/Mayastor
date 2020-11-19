@@ -18,7 +18,7 @@ class Volumes extends EventEmitter {
   }
 
   start () {
-    var self = this;
+    const self = this;
     this.events = new EventStream({ registry: this.registry });
     this.events.on('data', async function (ev) {
       if (ev.kind === 'pool' && ev.eventType === 'new') {
@@ -137,6 +137,7 @@ class Volumes extends EventEmitter {
         });
         throw err;
       }
+      volume.fsa();
     }
     return volume;
   }

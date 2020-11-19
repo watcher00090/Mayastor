@@ -7,5 +7,6 @@
 /pool.js
 /pool_operator.js
 /replica.js
+/volume.js
 /volume_operator.js
 /*.js.map
