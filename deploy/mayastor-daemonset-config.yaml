@@ -35,7 +35,7 @@ spec:
         command: ['sh', '-c', 'until nc -vz nats 4222; do echo "Waiting for message bus..."; sleep 1; done;']
       containers:
         - name: mayastor
-          image: mayadata/mayastor:latest
+          image: mayadata/mayastor:5ce824d
           imagePullPolicy: Always
           env:
             - name: MY_NODE_NAME
@@ -69,11 +69,11 @@ spec:
               mountPath: /var/local/mayastor/child-status-config.yaml
           resources:
             limits:
-              cpu: "1"
+              cpu: "2"
               memory: "500Mi"
               hugepages-2Mi: "1Gi"
             requests:
-              cpu: "1"
+              cpu: "2"
               memory: "500Mi"
               hugepages-2Mi: "1Gi"
           ports:
