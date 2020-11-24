@@ -9,25 +9,25 @@
 const expect = require('chai').expect;
 const sinon = require('sinon');
 const { Nexus } = require('../nexus');
-const Node = require('../node');
+const { Node } = require('../node');
 const { Pool } = require('../pool');
 const Registry = require('../registry');
 const { Replica } = require('../replica');
-const Volume = require('../volume');
-const Volumes = require('../volumes');
+const { Volume } = require('../volume');
+const { Volumes } = require('../volumes');
 const { GrpcCode } = require('../grpc_client');
 const { shouldFailWith, waitUntil } = require('./utils');
 
 const UUID = 'ba5e39e9-0c0e-4973-8a3a-0dccada09cbb';
 
 module.exports = function () {
-  var registry, volumes;
-  var pool1, pool2, pool3;
-  var node1, node2, node3;
-  var stub1, stub2, stub3;
-  var nexus, replica1, replica2;
-  var volume;
-  var volEvents;
+  let registry, volumes;
+  let pool1, pool2, pool3;
+  let node1, node2, node3;
+  let stub1, stub2, stub3;
+  let nexus, replica1, replica2;
+  let volume;
+  let volEvents;
 
   // Create pristine test env with 3 pools on 3 nodes
   function createTestEnv () {

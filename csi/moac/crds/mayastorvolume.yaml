@@ -70,13 +70,16 @@ spec:
                 reason:
                   description: Further explanation of the state if applicable.
                   type: string
-                node:
-                  description: Name of the k8s node with the nexus.
+                publishedOn:
+                  description: Name of the k8s node where the volume is published (nexus node).
                   type: string
                 nexus:
                   description: Frontend of the volume.
                   type: object
                   properties:
+                    node:
+                      description: Name of the k8s node with the nexus.
+                      type: string
                     deviceUri:
                       description: URI of a block device for IO.
                       type: string
@@ -115,9 +118,9 @@ spec:
                         description: Is replica reachable by control plane.
                         type: boolean
       additionalPrinterColumns:
-        - name: Node
+        - name: PublishedOn
           type: string
-          description: Node where the volume is located
+          description: Node where the volume is published
           jsonPath: .status.node
         - name: Size
           type: integer

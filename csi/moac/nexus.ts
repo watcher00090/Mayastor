@@ -300,18 +300,8 @@ export class Nexus {
   // Destroy nexus on storage node.
   async destroy() {
     log.debug(`Destroying nexus "${this}" ...`);
-
-    try {
-      await this.node.call('destroyNexus', { uuid: this.uuid });
-      log.info(`Destroyed nexus "${this}"`);
-    } catch (err) {
-      // TODO: make destroyNexus idempotent
-      if (err.code !== GrpcCode.NOT_FOUND) {
-        throw err;
-      }
-      log.warn(`Destroyed nexus "${this}" does not exist`);
-    }
-
+    await this.node.call('destroyNexus', { uuid: this.uuid });
+    log.info(`Destroyed nexus "${this}"`);
     this.unbind();
   }
 }

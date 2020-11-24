@@ -56,6 +56,7 @@ import {
   CustomResourceMeta,
 } from './watcher';
 import { Protocol, protocolFromString } from './nexus';
+import { Volumes } from './volumes';
 
 const RESOURCE_NAME: string = 'mayastorvolume';
 const crdVolume = yaml.safeLoad(
@@ -108,7 +109,7 @@ type VolumeStatus = {
   size: number,
   state: State,
   reason?: string,
-  node: string, // special meaning of the field is that vol is published if set
+  publishedOn?: string, // node name of nexus if the volume is published
   replicas: {
     node: string,
     pool: string,
@@ -116,6 +117,7 @@ type VolumeStatus = {
     offline: boolean,
   }[],
   nexus?: {
+    node: string,
     deviceUri?: string,
     state: string,
     children: {
@@ -164,13 +166,15 @@ export class VolumeResource extends CustomResource {
       this.status = <VolumeStatus> {
         size: status.size || 0,
         state: stateFromString(status.state),
-        node: status.node,
         // sort the replicas according to uri to have deterministic order
         replicas: [].concat(status.replicas || []).sort((a: any, b: any) => {
           if (a.uri < b.uri) return -1;
           else if (a.uri > b.uri) return 1;
           else return 0;
         }),
+      }
+      if (status.publishedOn) {
+        this.status.publishedOn = status.publishedOn;
       }
       if (status.nexus) {
         this.status.nexus = status.nexus;
@@ -191,7 +195,7 @@ export class VolumeResource extends CustomResource {
 // Volume operator managing volume k8s custom resources.
 export class VolumeOperator {
   namespace: string;
-  volumes: any; // Volume manager
+  volumes: Volumes; // Volume manager
   eventStream: any; // A stream of node, replica and nexus events.
   watcher: CustomResourceCache<VolumeResource>; // volume resource watcher.
   workq: any; // Events from k8s are serialized so that we don't flood moac by
@@ -206,7 +210,7 @@ export class VolumeOperator {
   constructor (
     namespace: string,
     kubeConfig: KubeConfig,
-    volumes: any,
+    volumes: Volumes,
     idleTimeout: number | undefined,
   ) {
     this.namespace = namespace;
@@ -300,7 +304,6 @@ export class VolumeOperator {
     const st: VolumeStatus = {
       size: volume.getSize(),
       state: stateFromString(volume.state),
-      node: volume.getNodeName(),
       replicas: Object.values(volume.replicas).map((r: any) => {
         return {
           node: r.pool.node.name,
@@ -310,8 +313,12 @@ export class VolumeOperator {
         };
       })
     };
+    if (volume.getNodeName()) {
+      st.publishedOn = volume.getNodeName();
+    }
     if (volume.nexus) {
       st.nexus = {
+        node: volume.nexus.node.name,
         deviceUri: volume.nexus.deviceUri || '',
         state: volume.nexus.state,
         children: volume.nexus.children.map((ch: any) => {
@@ -457,7 +464,7 @@ export class VolumeOperator {
     watcher.on('del', (obj: VolumeResource) => {
       // most likely it was not user but us (the operator) who deleted
       // the resource. So check if it really exists first.
-      if (this.volumes.get(obj.metadata.name)) {
+      if (this.volumes.get(obj.metadata.name!)) {
         this.workq.push(obj.metadata.name, this._destroyVolume.bind(this));
       }
     });
@@ -473,7 +480,7 @@ export class VolumeOperator {
 
     log.debug(`Importing volume "${uuid}" in response to "new" resource event`);
     try {
-      await this.volumes.importVolume(uuid, resource.spec, resource.status);
+      this.volumes.importVolume(uuid, resource.spec, resource.status);
     } catch (err) {
       log.error(
         `Failed to import volume "${uuid}" based on new resource: ${err}`
